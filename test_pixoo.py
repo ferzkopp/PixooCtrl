@@ -117,6 +117,7 @@ def test_clock_mode(pixoo: Pixoo):
 
 
 def main():
+    """Run the full test suite end-to-end against the configured device."""
     print("=" * 50)
     print("  Pixoo 16x16 Connection Test")
     print("=" * 50)
@@ -127,7 +128,7 @@ def main():
         pixoo = Pixoo.from_config()
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
-        print("Run find_and_pair_pixoo.ps1 first to set up your device.")
+        print("Run setup.ps1 on Windows or setup.sh on Linux to set up your device.")
         sys.exit(1)
 
     print(f"Device MAC: {pixoo.mac_address}")

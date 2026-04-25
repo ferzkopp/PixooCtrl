@@ -7,24 +7,48 @@ Simulates at 64x64 resolution using metaballs, then downscales to the
 
 import math
 import random
-import signal
-import sys
-import time
 
 from PIL import Image
 
-from pixoo import Pixoo
+from demo_runner import FrameContext, main as run_demo
 
-# Simulation grid
+# ── Resolution ─────────────────────────────────────────────────────
 SIM_W = 64
 SIM_H = 64
-
-# Pixoo display
 DISPLAY_SIZE = 16
 
-# Timing
+# ── Timing ─────────────────────────────────────────────────────────
 TARGET_FPS = 30
-FRAME_DELAY = 1.0 / TARGET_FPS
+
+# ── Blob physics ───────────────────────────────────────────────────
+# Fewer, larger blobs read as more distinctly "blobby" once downscaled to
+# 16x16 — they stay as discrete rounded shapes that occasionally merge,
+# rather than blurring into one big lava puddle.
+NUM_BLOBS = 4
+BLOB_RADIUS_RANGE = (5.5, 9.5)        # px in simulation grid
+BLOB_VY_RANGE = (-4.0, 4.0)           # vertical drift, sim-px per second
+WOBBLE_SPEED_RANGE = (0.5, 1.5)       # rad/sec for horizontal wobble
+WOBBLE_AMP_RANGE = (0.3, 1.0)         # sim-px amplitude
+BOUNCE_SPEED_JITTER = (0.8, 1.2)      # multiplier when reversing at top/bottom
+TOP_BOUNCE_FRAC = 0.05                # bounce when y < SIM_H * this
+BOTTOM_BOUNCE_FRAC = 0.95             # bounce when y > SIM_H * this
+
+# ── Field thresholds ───────────────────────────────────────────────
+# A pixel's "metaball field" is sum of (radius² / distance²) over all blobs.
+# Above LAVA_THRESHOLD it's solid lava; between GLOW_THRESHOLD and
+# LAVA_THRESHOLD it's the soft glow fringe; below that it's background.
+# Higher thresholds = tighter, more discrete blob silhouettes.
+GLOW_THRESHOLD = 0.7
+LAVA_THRESHOLD = 1.0
+LAVA_INTENSITY_DIVISOR = 1.5          # scales (field - LAVA_THRESHOLD) → 0..1
+GLOW_BLEND = 0.6                      # glow blend strength toward lava_low
+
+# ── Colors ─────────────────────────────────────────────────────────
+BG_COLOR = (15, 5, 30)            # deep purple-black
+BG_GRADIENT_END = (25, 8, 20)     # bottom of the background gradient
+LAVA_LOW = (180, 20, 0)           # dark red
+LAVA_MID = (255, 80, 0)           # orange
+LAVA_HIGH = (255, 200, 50)        # bright yellow-orange
 
 
 class Blob:
@@ -34,18 +58,16 @@ class Blob:
         self.x = x
         self.y = y
         self.radius = radius
-        self.vy = vy  # vertical drift speed
+        self.vy = vy
         self.vx = 0.0
-        # Wobble parameters
         self.wobble_phase = random.uniform(0, 2 * math.pi)
-        self.wobble_speed = random.uniform(0.5, 1.5)
-        self.wobble_amp = random.uniform(0.3, 1.0)
+        self.wobble_speed = random.uniform(*WOBBLE_SPEED_RANGE)
+        self.wobble_amp = random.uniform(*WOBBLE_AMP_RANGE)
 
     def update(self, dt: float):
-        # Vertical drift
+        """Advance the blob by ``dt`` seconds, applying drift, wobble and bounce."""
         self.y += self.vy * dt
 
-        # Horizontal wobble
         self.wobble_phase += self.wobble_speed * dt
         self.vx = math.sin(self.wobble_phase) * self.wobble_amp
         self.x += self.vx * dt
@@ -57,10 +79,10 @@ class Blob:
             self.x = -self.radius
 
         # Reverse direction at top/bottom (lava lamp behavior)
-        if self.y < SIM_H * 0.05:
-            self.vy = abs(self.vy) * random.uniform(0.8, 1.2)
-        elif self.y > SIM_H * 0.95:
-            self.vy = -abs(self.vy) * random.uniform(0.8, 1.2)
+        if self.y < SIM_H * TOP_BOUNCE_FRAC:
+            self.vy = abs(self.vy) * random.uniform(*BOUNCE_SPEED_JITTER)
+        elif self.y > SIM_H * BOTTOM_BOUNCE_FRAC:
+            self.vy = -abs(self.vy) * random.uniform(*BOUNCE_SPEED_JITTER)
 
 
 def lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
@@ -73,33 +95,27 @@ def lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
     )
 
 
-def make_blobs(count: int = 6) -> list[Blob]:
+def make_blobs(count: int = NUM_BLOBS) -> list[Blob]:
     """Spawn initial blobs spread across the lamp."""
     blobs = []
     for _ in range(count):
         x = random.uniform(SIM_W * 0.2, SIM_W * 0.8)
         y = random.uniform(SIM_H * 0.15, SIM_H * 0.85)
-        radius = random.uniform(4.0, 8.0)
-        vy = random.uniform(-4.0, 4.0)
+        radius = random.uniform(*BLOB_RADIUS_RANGE)
+        vy = random.uniform(*BLOB_VY_RANGE)
         blobs.append(Blob(x, y, radius, vy))
     return blobs
 
 
-def render_frame(blobs: list[Blob], t: float) -> Image.Image:
+def render_sim(blobs: list[Blob]) -> Image.Image:
     """Render the simulation to a PIL Image at SIM_W x SIM_H."""
-    # Color palette: warm lava colors
-    bg_color = (15, 5, 30)        # deep purple-black
-    lava_low = (180, 20, 0)       # dark red
-    lava_mid = (255, 80, 0)       # orange
-    lava_high = (255, 200, 50)    # bright yellow-orange
-
     img = Image.new("RGB", (SIM_W, SIM_H))
     pixels = img.load()
 
     # Slight background gradient (darker at top, warmer at bottom)
     for y in range(SIM_H):
         grad = y / SIM_H
-        base = lerp_color(bg_color, (25, 8, 20), grad * 0.5)
+        base = lerp_color(BG_COLOR, BG_GRADIENT_END, grad * 0.5)
         for x in range(SIM_W):
             pixels[x, y] = base
 
@@ -115,95 +131,42 @@ def render_frame(blobs: list[Blob], t: float) -> Image.Image:
                     dist_sq = 0.1
                 field += (blob.radius * blob.radius) / dist_sq
 
-            if field > 0.6:
-                # Inside the lava — map intensity to color
-                intensity = min(1.0, (field - 0.6) / 1.5)
+            if field > LAVA_THRESHOLD:
+                intensity = min(
+                    1.0, (field - LAVA_THRESHOLD) / LAVA_INTENSITY_DIVISOR
+                )
                 if intensity < 0.5:
-                    color = lerp_color(lava_low, lava_mid, intensity * 2)
+                    color = lerp_color(LAVA_LOW, LAVA_MID, intensity * 2)
                 else:
-                    color = lerp_color(lava_mid, lava_high, (intensity - 0.5) * 2)
+                    color = lerp_color(LAVA_MID, LAVA_HIGH, (intensity - 0.5) * 2)
                 pixels[x, y] = color
-            elif field > 0.4:
-                # Glow fringe
-                glow_t = (field - 0.4) / 0.2
+            elif field > GLOW_THRESHOLD:
+                glow_t = (field - GLOW_THRESHOLD) / (LAVA_THRESHOLD - GLOW_THRESHOLD)
                 base = pixels[x, y]
-                glow = lerp_color(base, lava_low, glow_t * 0.6)
-                pixels[x, y] = glow
+                pixels[x, y] = lerp_color(base, LAVA_LOW, glow_t * GLOW_BLEND)
 
     return img
 
 
-def run(preview: bool = False):
-    """Main loop: simulate and push frames to the Pixoo."""
-    running = True
+def make_state() -> dict:
+    """Build the per-run state: a fresh set of blobs."""
+    return {"blobs": make_blobs()}
 
-    def handle_signal(sig, frame):
-        nonlocal running
-        running = False
 
-    signal.signal(signal.SIGINT, handle_signal)
-
-    pixoo = None
-    if not preview:
-        pixoo = Pixoo.from_config()
-        pixoo.connect()
-        pixoo.set_brightness(60)
-        print(f"Connected to Pixoo at {pixoo.mac_address}")
-
-    blobs = make_blobs(6)
-    t = 0.0
-    frame_count = 0
-
-    print("Lava lamp running. Press Ctrl+C to stop.")
-
-    try:
-        last_time = time.monotonic()
-        while running:
-            frame_start = time.monotonic()
-
-            # Update physics
-            for blob in blobs:
-                blob.update(FRAME_DELAY)
-
-            # Render at simulation resolution
-            frame = render_frame(blobs, t)
-
-            # Downscale to 16x16 for display
-            display_img = frame.resize(
-                (DISPLAY_SIZE, DISPLAY_SIZE), Image.LANCZOS
-            )
-
-            if pixoo:
-                pixoo.draw_pil_image(display_img)
-            elif preview:
-                # Save preview frames periodically
-                if frame_count % 16 == 0:
-                    display_img.save(f"lava_preview_{frame_count:04d}.png")
-                    print(f"  Saved preview frame {frame_count}")
-
-            t += FRAME_DELAY
-            frame_count += 1
-
-            # Frame rate limiter — sleep for remaining budget
-            elapsed = time.monotonic() - frame_start
-            remaining = FRAME_DELAY - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
-
-            # Report actual FPS (wall-clock, including sleep + BT send)
-            if frame_count % 50 == 0:
-                now = time.monotonic()
-                actual_fps = 50.0 / (now - last_time)
-                last_time = now
-                print(f"  Frame {frame_count}, {actual_fps:.1f} fps")
-
-    finally:
-        if pixoo:
-            pixoo.set_color(0, 0, 0)
-            pixoo.disconnect()
-            print("Disconnected.")
+def render(ctx: FrameContext) -> Image.Image:
+    """Advance every blob, render the metaball field, downscale to 16×16."""
+    blobs: list[Blob] = ctx.state["blobs"]
+    for blob in blobs:
+        blob.update(ctx.dt)
+    sim_frame = render_sim(blobs)
+    return sim_frame.resize((DISPLAY_SIZE, DISPLAY_SIZE), Image.LANCZOS)
 
 
 if __name__ == "__main__":
-    preview_mode = "--preview" in sys.argv
-    run(preview=preview_mode)
+    run_demo(
+        name="lava",
+        description="Lava lamp metaball simulation for the Pixoo 16x16.",
+        target_fps=TARGET_FPS,
+        render=render,
+        state_factory=make_state,
+    )
