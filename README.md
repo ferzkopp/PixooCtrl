@@ -16,7 +16,7 @@ This project provides:
 - **`pixoo.py`** — Python control library: pixel buffer with `set_pixel()` / `show()`, image and GIF sending, brightness, solid color, and mode control over Bluetooth Classic (RFCOMM).
 - **`test_pixoo.py`** — Visual test suite: 8 tests including solid colors, brightness ramp, diagonal line, checkerboard, nested rectangles, gradient, smiley face, and clock mode.
 
-**Demos** (each runnable on the device or in `--preview` mode)
+**Demos** (each runnable on the device, in `--preview` mode for PNGs, or in `--simulate` mode for an on-screen window)
 
 - **`lava_lamp.py`** — Lava lamp simulation using metaballs, rendered at 64x64 and downscaled to 16x16.
 - **`plasma.py`** — Classic demoscene plasma effect with layered sine/cosine waves and cycling color palette.
@@ -164,6 +164,20 @@ pixoo.disconnect()
 ```
 
 If your Pixoo uses a different RFCOMM port (some audio-capable Divoom devices use port 2), edit `bt_port` in this file.
+
+## Running Without a Device
+
+If you don't have a Pixoo, you can still run any of the demos. Every demo script accepts the same two "no device" flags:
+
+- `--simulate` opens an on-screen window that mimics the real Pixoo bezel — same plastic frame, LED grid and soft glow used by the README screenshots — and updates it in real time.
+- `--preview` writes one PNG per N frames into `--preview-dir` (default: current directory).
+
+```powershell
+# See plasma in a window without owning a Pixoo
+.\.venv\Scripts\python.exe plasma.py --simulate
+```
+
+Close the window (or press `Ctrl+C`) to stop. `--simulate` requires Tk, which ships with the standard Python installer on Windows and macOS; on minimal Linux systems you may need `apt install python3-tk`.
 
 ## Demo Scripts
 

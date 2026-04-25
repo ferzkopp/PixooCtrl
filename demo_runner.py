@@ -82,6 +82,14 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
         help="Don't connect to the Pixoo; save preview PNGs locally instead.",
     )
     parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help=(
+            "Don't connect to the Pixoo; show the demo in an on-screen "
+            "window using the same bezel graphics as the README previews."
+        ),
+    )
+    parser.add_argument(
         "--preview-dir",
         type=Path,
         default=Path("."),
@@ -150,6 +158,7 @@ class DemoRunner:
             preview_every=args.preview_every,
             brightness=args.brightness,
             config_path=args.config,
+            simulate=getattr(args, "simulate", False),
         )
 
     def run(
@@ -159,6 +168,7 @@ class DemoRunner:
         preview_every: int = 16,
         brightness: int = DEFAULT_BRIGHTNESS,
         config_path: str | None = None,
+        simulate: bool = False,
     ) -> None:
         """Run the demo loop until interrupted.
 
@@ -185,8 +195,26 @@ class DemoRunner:
             except (ValueError, OSError):
                 pass
 
+        # --simulate and --preview are mutually exclusive; --simulate wins
+        # if both are passed because it's the more interactive of the two.
+        if simulate and preview:
+            print("  --simulate overrides --preview; ignoring --preview.")
+            preview = False
+
         pixoo: Pixoo | None = None
-        if not preview:
+        sim = None
+        if simulate:
+            # Lazy import so headless environments without Tk can still
+            # import demo_runner (e.g. for gen_previews).
+            from simulator import open_simulator
+            sim = open_simulator(self.name)
+            if sim is None:
+                # Fall back to preview-mode PNG dumps so the user still
+                # gets something useful instead of a silent no-op.
+                print("  Falling back to --preview mode.")
+                preview = True
+                preview_dir.mkdir(parents=True, exist_ok=True)
+        elif not preview:
             pixoo = Pixoo.from_config(config_path)
             pixoo.connect()
             pixoo.set_brightness(brightness)
@@ -221,10 +249,19 @@ class DemoRunner:
                         ):
                             # Reconnect failed permanently; bail out of the loop.
                             break
+                    elif sim is not None:
+                        sim.show_frame(img)
                     elif preview and frame_count % preview_every == 0:
                         out = preview_dir / f"{self.name}_preview_{frame_count:04d}.png"
                         img.save(out)
                         print(f"  Saved preview frame {frame_count} → {out}")
+
+                # Pump the simulator window every frame so it stays
+                # responsive and we notice if the user closes it.
+                if sim is not None:
+                    sim.pump()
+                    if sim.closed:
+                        self._running = False
 
                 frame_count += 1
 
@@ -252,6 +289,8 @@ class DemoRunner:
                     pass
                 pixoo.disconnect()
                 print("Disconnected.")
+            if sim is not None:
+                sim.close()
 
     # ── Resilience helpers ───────────────────────────────────
 
