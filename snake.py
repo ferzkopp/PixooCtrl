@@ -1,16 +1,19 @@
 """
 Snake game simulation for the Divoom Pixoo 16x16.
 
-An endless auto-playing snake game with a simple 1-step-lookahead AI.
+An endless auto-playing snake game with three rotating AI strategies.
 A green snake chases multi-coloured food targets and grows with each
 meal. When it collides with itself a death animation plays, the final
-length is shown briefly, and the game restarts.
+length is shown briefly, and the next game starts — each game is
+preceded by a 1 s title screen showing an icon for the strategy about
+to play.
 
-AI limitations: the AI is greedy — it picks the safe neighbour that
-minimises Manhattan distance to the nearest food and maximises reachable
-flood-fill area. It does NOT plan multi-step paths or maintain a
-Hamiltonian cycle, so on long snakes it can still self-trap. That's
-intentional for this demo (the death animation is part of the show).
+AI strategies (rotated in order):
+  * floodfill — greedy 1-step lookahead. Myopic; traps itself easily.
+  * astar     — A* shortest path to nearest food, tail-chase fallback.
+  * lookahead — A* + virtual-snake safety check (only commit if we can
+                still reach our tail after eating), with a longest-path-
+                toward-tail survival fallback. Strongest of the three.
 """
 
 import heapq
@@ -85,14 +88,28 @@ SCORE_BG = (0, 0, 0)
 # AI scoring weights
 DISTANCE_WEIGHT = 10  # subtracted per Manhattan unit to nearest food
 
-# AI strategy identifiers. The demo alternates between these on each new
-# game so the display shows two visibly different playstyles over time:
+# AI strategy identifiers. The demo cycles through these on each new
+# game so the display shows visibly different playstyles over time:
 #   * "floodfill" — greedy 1-step lookahead, score = -dist + reachable area.
 #   * "astar"     — A* shortest-path to nearest food; falls back to chasing
 #                   the tail when no path exists, then to any safe move.
+#   * "lookahead" — A* to food + virtual-snake safety check (only commit
+#                   if we can still reach our tail after eating), with a
+#                   longest-path-toward-tail survival fallback. This is the
+#                   strongest of the three and reliably outscores the others
+#                   on long runs because it refuses moves that would trap it.
 AI_FLOODFILL = "floodfill"
 AI_ASTAR = "astar"
-AI_STRATEGIES = (AI_FLOODFILL, AI_ASTAR)
+AI_LOOKAHEAD = "lookahead"
+AI_STRATEGIES = (AI_FLOODFILL, AI_ASTAR, AI_LOOKAHEAD)
+
+# ── Title screen ───────────────────────────────────────────────────
+# Shown for TITLE_SECONDS before each new game so the viewer can tell
+# which AI is about to play. Each strategy has its own 16x16 icon and
+# accent colour.
+TITLE_SECONDS = 1.0
+TITLE_TICK_HZ = 30
+TITLE_TICK_INTERVAL = 1.0 / TITLE_TICK_HZ
 
 # Tiny 3x5 pixel font for digits 0-9 plus the 'H' and 'S' glyphs needed
 # for the highscore label. Kept inline so this demo has no extra asset
@@ -195,6 +212,8 @@ class SnakeGame:
         """Pick the next heading using the configured AI strategy."""
         if self.ai == AI_ASTAR:
             self._choose_direction_astar()
+        elif self.ai == AI_LOOKAHEAD:
+            self._choose_direction_lookahead()
         else:
             self._choose_direction_floodfill()
 
@@ -331,6 +350,117 @@ class SnakeGame:
         safe = [d for d in candidates if self._is_safe((hx + d[0], hy + d[1]))]
         if not safe:
             return
+        blocked_for_score = body_set - {tail}
+        blocked_for_score.add(head)
+        self.direction = max(
+            safe,
+            key=lambda d: self._flood_fill_size((hx + d[0], hy + d[1]), blocked_for_score),
+        )
+
+    # ── Lookahead AI: A* + virtual-snake safety check ─────────────
+    #
+    # The two simpler strategies above die because they decide based only
+    # on the *current* board. This one looks one full path ahead:
+    #
+    #   1. A* to the nearest reachable food.
+    #   2. *Simulate* eating it — fast-forward the snake along that path
+    #      and grow by one. From the resulting (virtual) head, try to A*
+    #      back to the (virtual) tail. If a path exists, the body still
+    #      forms a connected loop the snake can chase forever, so the
+    #      move is provably safe and we commit to it.
+    #   3. If no food path is safe, *survive* by heading toward our own
+    #      tail along the longest path we can find. Buying time lets the
+    #      body shrink (figuratively) and frees up new routes.
+    #   4. Last resort: any safe move maximising flood-fill area.
+    #
+    # The longest-path search is NP-hard in general; we approximate by
+    # picking the safe neighbour whose shortest path to the tail is the
+    # *longest* — i.e. the one that keeps the most buffer between head
+    # and tail. Cheap and works well in practice on a 16×16.
+
+    def _simulate_eat(
+        self, path: list[tuple[int, int]]
+    ) -> deque:
+        """Return the body deque after virtually following `path` and eating at the end."""
+        virtual = deque(self.body)
+        # Intermediate steps: move (grow head, drop tail).
+        for cell in path[1:-1]:
+            virtual.appendleft(cell)
+            virtual.pop()
+        # Final step lands on the food: grow head, keep tail.
+        virtual.appendleft(path[-1])
+        return virtual
+
+    def _path_length(
+        self, start: tuple[int, int], goal: tuple[int, int], blocked: set
+    ) -> int:
+        """Length of shortest path start→goal, or -1 if unreachable."""
+        path = self._astar(start, goal, blocked)
+        return -1 if path is None else len(path)
+
+    def _choose_direction_lookahead(self):
+        head = self.body[0]
+        hx, hy = head
+        body_set = set(self.body)
+        tail = self.body[-1]
+        opposite = self._opposite(self.direction)
+
+        # 1) Find the shortest A* path to any food.
+        blocked = body_set - {tail}
+        best_path: list[tuple[int, int]] | None = None
+        for (fx, fy), _ in self.food:
+            path = self._astar(head, (fx, fy), blocked)
+            if path is not None and (
+                best_path is None or len(path) < len(best_path)
+            ):
+                best_path = path
+
+        # 2) Virtual-snake safety check: only commit to the food path if,
+        #    after eating, we can still reach our tail.
+        if best_path is not None and len(best_path) >= 2:
+            virtual = self._simulate_eat(best_path)
+            v_head = virtual[0]
+            v_tail = virtual[-1]
+            v_blocked = set(virtual) - {v_tail}
+            if v_head == v_tail or self._astar(v_head, v_tail, v_blocked) is not None:
+                nx, ny = best_path[1]
+                new_dir = (nx - hx, ny - hy)
+                if new_dir != opposite and self._is_safe((nx, ny)):
+                    self.direction = new_dir
+                    return
+
+        # 3) Survival mode: pick the safe neighbour with the *longest*
+        #    shortest-path back to the tail. This approximates the longest
+        #    head→tail path and keeps the body uncoiled.
+        candidates = [d for d in DIRECTIONS if d != opposite]
+        safe = [d for d in candidates if self._is_safe((hx + d[0], hy + d[1]))]
+        if not safe:
+            return
+
+        if len(self.body) > 1:
+            tail_blocked_base = body_set - {tail}
+
+            def survival_score(d):
+                nx, ny = hx + d[0], hy + d[1]
+                # Block the head's current cell so the search must route
+                # through the rest of the board, not back through us.
+                blk = set(tail_blocked_base)
+                blk.add(head)
+                blk.discard((nx, ny))
+                dist = self._path_length((nx, ny), tail, blk)
+                if dist < 0:
+                    # Unreachable — heavily penalise but keep flood-fill
+                    # as a tiebreaker so we still pick the roomiest dead-end.
+                    area = self._flood_fill_size((nx, ny), blk)
+                    return (-1, area)
+                return (dist, 0)
+
+            best = max(safe, key=survival_score)
+            if survival_score(best)[0] >= 0:
+                self.direction = best
+                return
+
+        # 4) Last resort: maximise reachable area.
         blocked_for_score = body_set - {tail}
         blocked_for_score.add(head)
         self.direction = max(
@@ -580,20 +710,132 @@ def render_score_frame(
     return _render_highscore_view(highscore, hs_color)
 
 
+# ── Title screen icons ─────────────────────────────────────────────
+#
+# Each AI gets a distinctive icon and accent colour shown for ~1 s
+# before the game starts. Icons are stored as 16-line strings where
+# '#' marks an on-pixel and any other char (typically '.') is off.
+#
+#   floodfill → water droplet (the AI "floods" outward from the head)
+#   astar     → five-pointed star (the literal A* algorithm)
+#   lookahead → eye (the AI "looks ahead" before committing to a move)
+#
+# A small fade-in plus a gentle brightness pulse keeps the title
+# screen feeling alive instead of static.
+
+_TITLE_ICONS: dict[str, list[str]] = {
+    AI_FLOODFILL: [
+        "................",
+        ".......##.......",
+        ".......##.......",
+        "......####......",
+        "......####......",
+        ".....######.....",
+        "....########....",
+        "...##########...",
+        "...##########...",
+        "..############..",
+        "..############..",
+        "..############..",
+        "...##########...",
+        "....########....",
+        ".....######.....",
+        "................",
+    ],
+    AI_ASTAR: [
+        "................",
+        ".......##.......",
+        ".......##.......",
+        "......####......",
+        "......####......",
+        ".##############.",
+        "..############..",
+        "...##########...",
+        "....########....",
+        "....########....",
+        "...###.##.###...",
+        "..##...##...##..",
+        ".##....##....##.",
+        ".#.....##.....#.",
+        "................",
+        "................",
+    ],
+    AI_LOOKAHEAD: [
+        "................",
+        "................",
+        "................",
+        ".....######.....",
+        "...##########...",
+        "..####....####..",
+        ".###..####..###.",
+        ".##..######..##.",
+        ".##..######..##.",
+        ".###..####..###.",
+        "..####....####..",
+        "...##########...",
+        ".....######.....",
+        "................",
+        "................",
+        "................",
+    ],
+}
+
+_TITLE_COLORS: dict[str, tuple[int, int, int]] = {
+    AI_FLOODFILL: (60, 160, 255),    # water blue
+    AI_ASTAR:     (255, 215, 0),     # gold star
+    AI_LOOKAHEAD: (120, 255, 140),   # bright green ("smart" snake)
+}
+
+
+def render_title_frame(ai: str, elapsed: float) -> Image.Image:
+    """Render the pre-game title screen for `ai` at `elapsed` seconds.
+
+    The icon fades in over the first ~150 ms and pulses gently for the
+    remainder, giving the screen some motion without distracting from
+    the symbol itself.
+    """
+    img = Image.new("RGB", (DISPLAY_SIZE, DISPLAY_SIZE), BACKGROUND)
+    pixels = img.load()
+    sprite = _TITLE_ICONS.get(ai)
+    if sprite is None:
+        return img
+    base = _TITLE_COLORS.get(ai, (255, 255, 255))
+
+    # Fade-in over the first 0.15 s, then a gentle 2 Hz brightness pulse.
+    fade_in = min(1.0, elapsed / 0.15)
+    pulse = 0.85 + 0.15 * abs(
+        ((elapsed * 2.0) % 2.0) - 1.0
+    )  # triangle wave 0.85 ↔ 1.00
+    intensity = fade_in * pulse
+    color = (
+        int(base[0] * intensity),
+        int(base[1] * intensity),
+        int(base[2] * intensity),
+    )
+
+    for y, row in enumerate(sprite):
+        for x, ch in enumerate(row):
+            if ch == "#" and 0 <= x < DISPLAY_SIZE and 0 <= y < DISPLAY_SIZE:
+                pixels[x, y] = color
+    return img
+
+
 # ── State machine driving the demo ─────────────────────────────────
 
 class SnakeState:
+    PHASE_TITLE = "title"
     PHASE_ALIVE = "alive"
     PHASE_DYING = "dying"
     PHASE_SCORE = "score"
 
     def __init__(self):
-        """Initialise the demo state machine in the ALIVE phase."""
-        # Start with flood-fill; the demo alternates strategies on each
-        # restart so viewers see both behaviours over a long session.
+        """Initialise the demo state machine on the title screen."""
+        # Start with flood-fill; the demo cycles through strategies on
+        # each restart so viewers see all behaviours over a long session.
         self._ai_index = 0
         self.game = SnakeGame(ai=AI_STRATEGIES[self._ai_index])
-        self.phase = self.PHASE_ALIVE
+        self.phase = self.PHASE_TITLE
+        self.title_started = time.monotonic()
         self.last_tick = 0.0
         self.death_step = 0
         self.death_body: list[tuple[int, int]] = []
@@ -622,9 +864,22 @@ def make_state() -> SnakeState:
 
 
 def render(ctx: FrameContext) -> Image.Image | None:
-    """Drive the alive → dying → score state machine and return the next frame."""
+    """Drive the title → alive → dying → score state machine and return the next frame."""
     s: SnakeState = ctx.state
     now = time.monotonic()
+
+    if s.phase == SnakeState.PHASE_TITLE:
+        elapsed = now - s.title_started
+        if elapsed >= TITLE_SECONDS:
+            s.phase = SnakeState.PHASE_ALIVE
+            s.last_tick = now
+            s.last_image = render_game(s.game)
+            return s.last_image
+        if now - s.last_tick < TITLE_TICK_INTERVAL and s.last_image is not None:
+            return None
+        s.last_tick = now
+        s.last_image = render_title_frame(s.game.ai, elapsed)
+        return s.last_image
 
     if s.phase == SnakeState.PHASE_ALIVE:
         if now - s.last_tick < GAME_TICK_INTERVAL and s.last_image is not None:
@@ -676,9 +931,10 @@ def render(ctx: FrameContext) -> Image.Image | None:
             next_ai = s.next_ai()
             s.game = SnakeGame(ai=next_ai)
             print(f"  Starting next game with AI: {next_ai}")
-            s.phase = SnakeState.PHASE_ALIVE
-            s.last_tick = now
-            s.last_image = render_game(s.game)
+            s.phase = SnakeState.PHASE_TITLE
+            s.title_started = now
+            s.last_tick = 0.0  # force an immediate title-frame render
+            s.last_image = render_title_frame(s.game.ai, 0.0)
             return s.last_image
         if now - s.last_tick < SCORE_TICK_INTERVAL and s.last_image is not None:
             return None

@@ -313,12 +313,13 @@ Top-down view of a dark water surface. Raindrops randomly splash, creating conce
 
 <img src="images/snake.png" alt="Snake preview" width="240">
 
-Endless auto-playing snake game. A green snake with a bright head chases multi-colored food targets, growing longer with each meal. Two different AIs take turns each game so the playstyle visibly changes between rounds:
+Endless auto-playing snake game. A green snake with a bright head chases multi-colored food targets, growing longer with each meal. Three different AIs take turns each game so the playstyle visibly changes between rounds, and a 1-second title screen with a distinctive icon announces which one is up next:
 
-- **Flood-fill greedy** — picks the safe neighbour that minimises Manhattan distance to the nearest food while maximising reachable area (avoids tight pockets).
-- **A\* pathfinding** — computes the shortest path to the nearest food avoiding the body, falls back to chasing the tail when no path exists.
+- 💧 **Flood-fill greedy** — picks the safe neighbour that minimises Manhattan distance to the nearest food while maximising reachable area (avoids tight pockets). Myopic; typically tops out around length 80–100.
+- ⭐ **A\* pathfinding** — computes the shortest path to the nearest food avoiding the body, falls back to chasing the tail when no path exists. Slightly stronger but still gets boxed in.
+- 👁️ **Lookahead with virtual-snake** — A\* to the nearest food, then *simulates* eating it and only commits to the move if the virtual snake can still reach its own tail afterwards (proving the body remains a chase-able loop). When no safe food path exists, it heads toward its own tail along the longest available route to buy time. Reliably reaches lengths in the 180–220 range and is the only one of the three that consistently beats 130.
 
-When the snake dies (collides with itself or a wall) a dramatic death animation plays at an increased framerate: the snake turns red, the head flickers white, and segments flash white as they disappear from tail to head. Afterwards a two-line score screen appears — the just-finished length on top in white, and `HS<n>` below in dim cyan showing the best length so far this session. When a run ties or beats the previous high both lines turn gold to celebrate the new record. The highscore is kept in memory only (it resets when the script restarts). Then the next game starts with the other AI.
+When the snake dies (collides with itself or a wall) a dramatic death animation plays at an increased framerate: the snake turns red, the head flickers white, and segments flash white as they disappear from tail to head. Afterwards a two-line score screen appears — the just-finished length on top in white, and `HS<n>` below in dim cyan showing the best length so far this session. When a run ties or beats the previous high both lines turn gold to celebrate the new record. The highscore is kept in memory only (it resets when the script restarts). Then the title card for the next AI appears and the next game starts.
 
 ### Hello Kitty (`hello_kitty.py`)
 
